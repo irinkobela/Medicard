@@ -1,39 +1,74 @@
+# hms_app_pkg/config.py
 import os
+from datetime import timedelta
+
+# Load environment variables from .env file if python-dotenv is installed
+# This is usually done in run.py or the app factory now.
+# from dotenv import load_dotenv
+# load_dotenv() # Not strictly needed here if loaded in run.py or app factory
 
 class Config:
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'd64fde6fe18c685d976f9b12dd5a5d016575b03ca03bf3ed'
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///hms_dev.db'
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
-    _jwt_secret_key_value = os.environ.get('JWT_SECRET_KEY') or 'c57662138895c0a955c3b8a3875695b8629976542862d732e3961c4e1afe14c7' # Your key
-    print(f"DEBUG: Config class JWT_SECRET_KEY being set to: '{_jwt_secret_key_value}'") # DEBUG PRINT
-    JWT_SECRET_KEY = _jwt_secret_key_value
+    """Base configuration settings."""
+    # Application Security
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'you_REALLY_should_set_a_secret_key_in_env'
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'you_REALLY_should_set_a_JWT_secret_key_in_env'
     JWT_ALGORITHM = 'HS256'
-    JWT_EXPIRATION_MINUTES = 60
+    JWT_EXPIRATION_MINUTES = int(os.environ.get('JWT_EXPIRATION_MINUTES', 60))
+    JWT_REFRESH_TOKEN_EXPIRES_DAYS = int(os.environ.get('JWT_REFRESH_TOKEN_EXPIRES_DAYS', 7))
+    
+    # Password Reset
+    PASSWORD_RESET_TOKEN_EXPIRES_HOURS = int(os.environ.get('PASSWORD_RESET_TOKEN_EXPIRES_HOURS', 1))
+
+    # Database
+    # Default to SQLite if DATABASE_URL is not set in the environment
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///hms_default.db'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # Frontend URL
+    FRONTEND_URL = os.environ.get('FRONTEND_URL') or 'http://localhost:3000'
+
 
 class DevelopmentConfig(Config):
-    """Development configuration."""
+    """Development-specific configuration."""
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or 'sqlite:///hms_dev.db'
-    JWT_REFRESH_TOKEN_EXPIRES_DAYS = 7  # Or your preferred duration
-    PASSWORD_RESET_TOKEN_EXPIRES_HOURS = 1
-    FRONTEND_URL = os.environ.get('FRONTEND_URL') or 'http://localhost:3000' # Your frontend app's URL
-    
+    # Override DATABASE_URL for development if DEV_DATABASE_URL is set, else use Config's default or DATABASE_URL
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL') or os.environ.get('DATABASE_URL') or 'sqlite:///hms_dev.db'
+    # For development, you might want shorter token expiries for easier testing of refresh logic
+    # JWT_EXPIRATION_MINUTES = 5
+    # JWT_REFRESH_TOKEN_EXPIRES_DAYS = 1
+
+
 class TestingConfig(Config):
-    """Testing configuration."""
-    DEBUG = True
+    """Testing-specific configuration."""
     TESTING = True
-    SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or 'sqlite:///hms_test.db' # Use a separate DB for tests
-    JWT_EXPIRATION_MINUTES = 1 # Short token life for testing
+    DEBUG = True # Often useful to have debug true for tests to get more error info
+    # Use a separate database for testing (in-memory SQLite or a dedicated test DB file)
+    SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or 'sqlite:///hms_test.db'
+    JWT_EXPIRATION_MINUTES = 1 # Very short token life for testing expiry
+    JWT_REFRESH_TOKEN_EXPIRES_DAYS = 1 # Short refresh token life for testing
+    PASSWORD_RESET_TOKEN_EXPIRES_HOURS = 1 # Can be short for testing
+
 
 class ProductionConfig(Config):
-    """Production configuration."""
+    """Production-specific configuration."""
     DEBUG = False
-    # Example for PostgreSQL in production, fetched from environment variables
-    # SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'postgresql://user:password@host:port/prod_db_name'
-    # Ensure SECRET_KEY and JWT_SECRET_KEY are ALWAYS set from environment variables in production
+    TESTING = False
+    # In production, critical variables like SECRET_KEY, JWT_SECRET_KEY, and DATABASE_URL
+    # MUST be set via environment variables. The fallbacks in Config are for convenience only.
+    # Example: Ensure DATABASE_URL is set, otherwise the app might not start or use an unintended default.
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
+    if not SQLALCHEMY_DATABASE_URI:
+        raise ValueError("No DATABASE_URL set for production environment")
+    
+    # Ensure secrets are set from environment in production
+    if Config.SECRET_KEY == 'you_REALLY_should_set_a_secret_key_in_env':
+        raise ValueError("SECRET_KEY not set via environment variable for production")
+    if Config.JWT_SECRET_KEY == 'you_REALLY_should_set_a_JWT_secret_key_in_env':
+        raise ValueError("JWT_SECRET_KEY not set via environment variable for production")
 
-# Helper function to get the correct config based on an environment variable
+
 def get_config():
+    """Helper function to get the correct config class based on FLASK_ENV."""
     env = os.environ.get('FLASK_ENV', 'development').lower()
     if env == 'production':
         return ProductionConfig
@@ -41,6 +76,3 @@ def get_config():
         return TestingConfig
     return DevelopmentConfig
 
-# To make it easy to import directly
-# from config import DevelopmentConfig etc.
-# Or use app.config.from_object(get_config())

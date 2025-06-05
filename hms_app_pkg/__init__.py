@@ -2,6 +2,8 @@
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate # type: ignore # Optional: For database migrations
+from dotenv import load_dotenv
+load_dotenv()
 
 # Import configurations - This assumes DevelopmentConfig, etc. are directly importable
 # If you used the get_config() helper in your config.py, you'd import that instead.
