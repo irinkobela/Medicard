@@ -69,12 +69,11 @@ def create_app(config_name='development'):
     app.register_blueprint(discharge_bp, url_prefix='/api')
 
 
-    # --- COMMENT OUT NEW, UNDEFINED BLUEPRINTS FOR NOW ---
-    # from .schedule.routes import schedule_bp
-    # app.register_blueprint(schedule_bp, url_prefix='/api')
+    from .schedule.routes import schedule_bp
+    app.register_blueprint(schedule_bp, url_prefix='/api')
 
-    # from .notifications.routes import notifications_bp
-    # app.register_blueprint(notifications_bp, url_prefix='/api')
+    from .notifications.routes import notifications_bp
+    app.register_blueprint(notifications_bp, url_prefix='/api')
 
     # from .reports.routes import reports_bp
     # app.register_blueprint(reports_bp, url_prefix='/api')

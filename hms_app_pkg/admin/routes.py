@@ -84,7 +84,36 @@ def setup_roles_permissions():
     'medication:reconcile': 'Can perform and log medication reconciliation',
     'medication:reconcile:read_log': 'Can read medication reconciliation logs',
     'medication:administer': 'Can document medication administration',
+    'notification:read': 'Can read own notifications',
+    'notification:update': 'Can update own notifications (e.g., mark as read)',
+    'notification:delete': 'Can delete own notifications',
+    'notification:create_system': 'Allows system components to create notifications (not for direct user assignment)'
+            , 
+            'result:acknowledge:lab': 'Can acknowledge lab results',
+            'result:acknowledge:imaging': 'Can acknowledge imaging results',
+            'result:acknowledge:consult': 'Can acknowledge consult results',
+            'result:acknowledge:all': 'Can acknowledge all types of results (admin)',
+            'result:read:lab': 'Can read lab results',
+            'result:read:imaging': 'Can read imaging results',
+            'result:read:consult': 'Can read consult results',
+            'result:read:any': 'Can read all types of results (admin)',
+            'result:review:lab': 'Can review lab results',
+            'result:review:imaging': 'Can review imaging results',
+            'result:review:consult': 'Can review consult results',
+            'result:review:any': 'Can review all types of results (admin)',
+            'result:delete:lab': 'Can delete lab results',
+            'result:delete:imaging': 'Can delete imaging results',
+            'result:delete:consult': 'Can delete consult results',
+            'result:delete:any': 'Can delete any type of result (admin)',
+            'orderable_item:read': 'Can read orderable items (medications, labs, etc.)',
+            'orderable_item:create': 'Can create new orderable items (admin)',
+            'orderable_item:update': 'Can update existing orderable items (admin)',
+            'orderable_item:delete': 'Can delete orderable items (admin)',
+            'orderable_item:read_catalog': 'Can read the catalog of orderable items',
+            'orderable_item:manage_catalog': 'Can manage the catalog of orderable items (admin)',
 
+            'admin:manage_roles': 'Can manage user roles and permissions',
+            'admin:manage_permissions': 'Can manage permissions and access control',
             'admin:manage_users': 'Can manage users and roles',
             'admin:manage_system_setup': 'Can perform system setup tasks'
         }
@@ -110,6 +139,7 @@ def setup_roles_permissions():
                 'discharge_plan:review', 'discharge_plan:reconcile', 'discharge_plan:manage_home_meds'
                 'medication:read', 'medication:manage_home_meds', 'medication:update',
         'medication:reconcile', 'medication:reconcile:read_log', 'medication:administer', 
+         'notification:read', 'notification:update', 'notification:delete', 
             ],
             'Resident': [
                 'patient:read', 'patient:read:own', 'note:create', 'note:read', 'note:sign',
@@ -122,7 +152,9 @@ def setup_roles_permissions():
         'discharge_plan:create', 'discharge_plan:read', 'discharge_plan:update', 
         'discharge_plan:delete', 'discharge_plan:review', 'discharge_plan:reconcile', 'discharge_plan:manage_home_meds'
          'medication:read', 'medication:manage_home_meds', 'medication:update',
-        'medication:reconcile', 'medication:reconcile:read_log', 'medication:administer', 
+        'medication:reconcile', 'medication:reconcile:read_log', 'medication:administer',  'notification:read', 'notification:update', 'notification:delete',
+        'appointment:read', 'appointment:create', 'appointment:update', 'appointment:cancel','appointment:cancel:any',  'appointment:manage_schedule', 'appointment:read:own', 'appointment:read:any',
+
             ],
 
             'Nurse': [ 
@@ -137,18 +169,21 @@ def setup_roles_permissions():
         'medication:update', 
         'medication:reconcile:read_log' 
         'medication:administer'
+        'notification:read', 'notification:update', 'notification:delete',
             ],
             'Pharmacist': [ 
                 'patient:read', 'order:read', 'order:read_catalog',
                 'medication:read', 'medication:manage_home_meds', 'medication:reconcile', # Permissions from medications blueprint
                 'discharge_plan:read', 'discharge_plan:reconcile', 'discharge_plan:manage_home_meds'
                 'medication:read', 'medication:manage_home_meds', 'medication:update',
-        'medication:reconcile', 'medication:reconcile:read_log', 
+        'medication:reconcile', 'medication:reconcile:read_log', 'notification:read', 'notification:update', 'notification:delete',
+
             ],
             'CaseManager': [ 
                 'patient:read', 'task:create', 'task:read:own', 'task:update:own',
                 'discharge_plan:create', 'discharge_plan:read', 'discharge_plan:update', 'discharge_plan:delete',
-                'discharge_plan:review', 'discharge_plan:read:any'
+                'discharge_plan:review', 'discharge_plan:read:any', 'notification:read', 'notification:update', 'notification:delete'
+                ,
             ],
             'SystemAdmin': list(permissions_data.keys())
         }

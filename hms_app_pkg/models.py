@@ -935,6 +935,182 @@ class HandoffEntry(db.Model):
             "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
             "review_notes": self.review_notes
         }
+class Notification(db.Model):
+    __tablename__ = 'notifications'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    
+    # Core Relationships
+    recipient_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    related_patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=True, index=True) # Added index
+
+    # Notification Content
+    message = db.Column(db.Text, nullable=False)
+    notification_type = db.Column(
+        db.String(100), 
+        nullable=False, 
+        index=True, 
+        comment="E.g., CRITICAL_LAB, TASK_DUE, NEW_CONSULT, ORDER_SIGN"
+    )
+    
+    is_read = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)
+
+    # Optional: Smart Linking to Specific Chart Elements
+    link_to_item_type = db.Column(
+        db.String(50), 
+        nullable=True, 
+        comment="E.g., 'Patient', 'Order', 'Task', 'LabResult'"
+    )
+    link_to_item_id = db.Column(db.String(36), nullable=True)
+
+    # Optional: Allow richer linking context (future extensibility)
+    metadata_json = db.Column(db.JSON, nullable=True, comment="Optional structured payload for frontend logic")
+
+    # Optional: Urgency flag for UI badge/highlight (non-blocking)
+    is_urgent = db.Column(db.Boolean, default=False, nullable=False)
+
+    # Relationships
+    recipient = db.relationship(
+        'User', 
+        backref=db.backref('all_notifications', lazy='dynamic', order_by="desc(Notification.created_at)") # Renamed backref for clarity
+    )
+    # Ensure Patient model is imported if not already via other relationships
+    related_patient = db.relationship('Patient', foreign_keys=[related_patient_id], backref=db.backref('related_notifications', lazy='dynamic'))
+
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "recipient_user_id": self.recipient_user_id,
+            "message": self.message,
+            "notification_type": self.notification_type,
+            "is_read": self.is_read,
+            "read_at": self.read_at.isoformat() if self.read_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "link_to_item_type": self.link_to_item_type,
+            "link_to_item_id": self.link_to_item_id,
+            "related_patient_id": self.related_patient_id,
+            "related_patient_name": (
+                f"{self.related_patient.first_name} {self.related_patient.last_name}"
+                if self.related_patient else None
+            ),
+            "metadata_json": self.metadata_json,
+            "is_urgent": self.is_urgent
+        }
 
     def __repr__(self):
+        return (
+            f"<Notification {self.id} | User: {self.recipient_user_id} | "
+            f"Type: {self.notification_type} | Urgent: {self.is_urgent}>"
+        )
+    def __repr__(self):
         return f'<HandoffEntry {self.id} for Patient {self.patient_id}>'
+    
+user_group_members = db.Table('user_group_members',
+    db.Column('user_id', db.Integer, db.ForeignKey('users.id'), primary_key=True),
+    db.Column('group_id', db.String(36), db.ForeignKey('user_groups.id'), primary_key=True)
+)
+
+
+class UserGroup(db.Model):
+    __tablename__ = 'user_groups'
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    # Relationship to User model for members
+    # The backref 'member_of_groups' will allow you to do user_instance.member_of_groups
+    members = db.relationship('User', secondary=user_group_members, lazy='dynamic',
+                              backref=db.backref('user_groups_membership', lazy='dynamic')) # Changed backref name for clarity
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "member_count": self.members.count() # Example of a useful derived property
+        }
+
+    def __repr__(self):
+        return f'<UserGroup {self.name}>'
+class Appointment(db.Model):
+    __tablename__ = 'appointments'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    
+    patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=False, index=True)
+    provider_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True) # This is the doctor/clinician
+    
+    start_datetime = db.Column(db.DateTime, nullable=False, index=True)
+    end_datetime = db.Column(db.DateTime, nullable=False) # Duration can be derived, but explicit end is often useful
+    
+    appointment_type = db.Column(db.String(100), nullable=True) # e.g., "New Patient Visit", "Follow-up", "Annual Physical", "Procedure"
+    
+    status = db.Column(
+        db.String(50), 
+        nullable=False, 
+        default='Scheduled', 
+        index=True,
+        comment="Valid values: Scheduled, Confirmed, CancelledByPatient, CancelledByClinic, Completed, NoShow, Rescheduled"
+    )
+    
+    location = db.Column(db.String(255), nullable=True) # e.g., "Clinic A, Room 101", "Telehealth"
+    reason_for_visit = db.Column(db.Text, nullable=True) # Patient's stated reason
+    notes = db.Column(db.Text, nullable=True) # Internal notes for the appointment
+    
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True) # User who booked it (scheduler, staff, or patient via portal)
+    
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    # Relationships
+    patient = db.relationship(
+        'Patient', 
+        backref=db.backref('patient_appointments', lazy='dynamic', order_by="desc(Appointment.start_datetime)") # Specific backref name
+    )
+    provider = db.relationship(
+        'User', 
+        foreign_keys=[provider_user_id], 
+        backref=db.backref('provider_appointments', lazy='dynamic') # Specific backref name
+    )
+    created_by = db.relationship(
+        'User', 
+        foreign_keys=[created_by_user_id],
+        backref=db.backref('appointments_created_by_user', lazy='dynamic') # Specific backref name
+    )
+
+    def to_dict(self, include_related=True):
+        data = {
+            "id": self.id,
+            "patient_id": self.patient_id,
+            "provider_user_id": self.provider_user_id,
+            "start_datetime": self.start_datetime.isoformat() if self.start_datetime else None,
+            "end_datetime": self.end_datetime.isoformat() if self.end_datetime else None,
+            "appointment_type": self.appointment_type,
+            "status": self.status,
+            "location": self.location,
+            "reason_for_visit": self.reason_for_visit,
+            "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_related:
+            if self.patient:
+                data["patient_name"] = f"{self.patient.first_name} {self.patient.last_name}"
+                data["patient_mrn"] = self.patient.mrn
+            if self.provider:
+                data["provider_name"] = self.provider.full_name # Assuming User model has full_name
+            if self.created_by:
+                data["created_by_username"] = self.created_by.username
+        return data
+
+    def __repr__(self):
+        return (
+            f"<Appointment {self.id} | Patient {self.patient_id} | "
+            f"Provider {self.provider_user_id} @ {self.start_datetime}>"
+        )
