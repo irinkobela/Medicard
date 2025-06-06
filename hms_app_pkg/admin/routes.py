@@ -1,7 +1,7 @@
 # hms_app_pkg/admin/routes.py
 from flask import Blueprint, jsonify, current_app
 from .. import db
-from ..models import Role, Permission, User, OrderableItem # Ensure all needed models are here
+from ..models import Role, Permission, User, OrderableItem, CDSRule # Ensure all needed models are here
 # from ..models import Patient, Task, etc. # If creating sample data for these
 from ..utils import permission_required # If you protect this endpoint
 
@@ -16,6 +16,8 @@ def setup_roles_permissions():
             'patient:read': 'Can read patient data',
             'patient:create': 'Can create new patients',
             'patient:read:own': 'Can read own assigned patients or patients on their service',
+            'patient:update': 'Can update patient data they are responsible for',
+            "patient:read:summary": 'Can read patient summary data',
 
             'note:create': 'Can create clinical notes',
             'note:read': 'Can read clinical notes (pertaining to accessible patients)',
@@ -91,6 +93,8 @@ def setup_roles_permissions():
             'medication:reconcile:read_log': 'Can read medication reconciliation logs',
             'medication:administer': 'Can document medication administration (MAR)',
             'medication:administer:any': 'Can document medication administration for any patient (nurse/pharmacist)',
+            'mar:read': 'Can read the Medication Administration Record',
+            'mar:document_administration': 'Can create a new MAR entry (i.e., document giving a med)',
 
             'notification:read': 'Can read own notifications',
             'notification:update': 'Can update own notifications (e.g., mark as read)',
@@ -148,10 +152,13 @@ def setup_roles_permissions():
             'report:read:task_completion': 'Can read task completion report',
             'report:read:length_of_stay': 'Can read length of stay report',
             'report:read:all': 'Can read all available reports',
-
-
             'user:profile:read': 'Can read own user profile', # From auth blueprint
             'user:logout': 'Can log out', # From auth blueprint
+            'dashboard:read': 'Can view their personal dashboard summary',
+            'cds:execute': 'Can execute Clinical Decision Support checks',
+            'patient:read:timeline': 'Can read the patient event timeline',
+
+
 
             'admin:manage_users': '(Admin) Can manage user accounts',
             'admin:manage_roles': '(Admin) Can manage user roles',
@@ -172,7 +179,7 @@ def setup_roles_permissions():
             'AttendingPhysician': [
                 # Patient & Notes
                 'patient:read', 'patient:create', 'patient:read:own',
-                'note:create', 'note:read', 'note:sign',
+                'note:create', 'note:read', 'note:sign', 'patient:read:summary'
                 # Orders
                 'order:create', 'order:read', 'order:sign', 'order:discontinue', 'order:read_catalog', 'order:sign:medication',
                 # Tasks
@@ -199,10 +206,14 @@ def setup_roles_permissions():
                 # Reports
                 'report:read:all', # Attendings often need full reporting access
                 # User Profile
-                'user:profile:read', 'user:logout'
+                'user:profile:read', 'user:logout',
+                'dashboard:read',
+                'cds:execute',
+                'mar:read', # <-- ADD
+            'mar:document_administration',
             ],
             'Resident': [
-                'patient:read', 'patient:read:own',
+                'patient:read', 'patient:read:own', 'patient:read:summary'
                 'note:create', 'note:read', # Cannot sign, needs co-signature
                 'order:create', 'order:read', 'order:read_catalog', # Cannot sign, needs co-signature
                 'task:create', 'task:read:own', 'task:update:own',
@@ -215,11 +226,12 @@ def setup_roles_permissions():
                 'notification:read', 'notification:update', 'notification:delete',
                 'result:read:lab', 'result:read:imaging', 'result:read:consult',
                 'result:acknowledge:lab', 'result:acknowledge:imaging', 'result:acknowledge:consult', # Can acknowledge routine results
-                'appointment:read:own',
-                'user:profile:read', 'user:logout'
+                'appointment:read:own', 'mar:read', # <-- ADD
+            'mar:document_administration',
+                'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
             ],
-            'Nurse': [ 
-                'patient:read', 'patient:read:own',
+            'Nurse': [
+                'patient:read', 'patient:read:own', 'patient:read:summary'
                 'note:create', 'note:read', # Nursing notes
                 'order:read', # View orders to carry them out
                 'task:create', 'task:read:own', 'task:update:own', # Manage their tasks
@@ -230,8 +242,9 @@ def setup_roles_permissions():
                 'medication:read', 'medication:administer', # Critical permission
                 'notification:read', 'notification:update', 'notification:delete',
                 'result:read:lab', 'result:acknowledge:lab', # Acknowledge routine labs
-                'appointment:read', # View patient appointments
-                'user:profile:read', 'user:logout'
+                'appointment:read', # View patient appointments 
+            'mar:document_administration', 'mar:read', 
+                'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute'
             ],
             'Pharmacist': [ 
                 'patient:read', 
@@ -240,24 +253,24 @@ def setup_roles_permissions():
                 'discharge_plan:read', 'discharge_plan:reconcile', 'discharge_plan:manage_home_meds',
                 'notification:read', 'notification:update', 'notification:delete',
                 'result:read:lab', # For drug-lab interactions, monitoring
-                'user:profile:read', 'user:logout'
+                'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute', 'mar:read',
             ],
             'CaseManager': [ 
-                'patient:read', 'patient:read:own',
+                'patient:read', 'patient:read:own','patient:read:summary',
                 'task:create', 'task:read:own', 'task:update:own',
                 'discharge_plan:create', 'discharge_plan:read', 'discharge_plan:update', 'discharge_plan:delete',
                 'discharge_plan:review', 'discharge_plan:read:any',
                 'notification:read', 'notification:update', 'notification:delete',
                 'handoff:read', 'flag:read', 
                 'appointment:read', 'report:read:length_of_stay', # Relevant report for this role
-                'user:profile:read', 'user:logout'
+                'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
             ],
             'Scheduler': [ # Example role for schedulers
                 'patient:read', 'patient:create', # To find and register patients for scheduling
                 'appointment:create', 'appointment:read:any', 'appointment:update:any', 
                 'appointment:cancel:any', 'appointment:reschedule:any', 'appointment:manage_schedule',
                 'notification:read', 'notification:update', 'notification:delete',
-                'user:profile:read', 'user:logout'
+                'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
             ],
             'SystemAdmin': list(permissions_data.keys()) # Gets all permissions
         }
@@ -285,8 +298,8 @@ def setup_roles_permissions():
         # Sample OrderableItems (as before)
         if not OrderableItem.query.first():
             sample_items_data = [
-                {'item_type': 'Medication', 'name': 'Aspirin 81mg Tablet', 'generic_name': 'Aspirin', 'code': 'NDC-ASP81'},
-                {'item_type': 'Medication', 'name': 'Lisinopril 10mg Tablet', 'generic_name': 'Lisinopril', 'code': 'NDC-LIS10'},
+                {'item_type': 'Medication', 'name': 'Aspirin 81mg Tablet', 'generic_name': 'Aspirin', 'code': 'NDC-ASP81', 'min_dose': 81, 'max_dose': 650, 'default_dose_unit': 'mg'},
+                {'item_type': 'Medication', 'name': 'Lisinopril 10mg Tablet', 'generic_name': 'Lisinopril', 'code': 'NDC-LIS10', 'min_dose': 2.5, 'max_dose': 40, 'default_dose_unit': 'mg'},
                 {'item_type': 'LabTest', 'name': 'Complete Blood Count (CBC)', 'code': 'LOINC-CBC'},
                 {'item_type': 'ImagingStudy', 'name': 'Chest X-Ray, 2 Views', 'code': 'CPT-CHESTXRAY'},
                 {'item_type': 'Consult', 'name': 'Cardiology Consult', 'code': 'CONS-CARDIO'},
@@ -297,6 +310,24 @@ def setup_roles_permissions():
             db.session.commit()
             current_app.logger.info("Added sample orderable items.")
 
+        # Sample CDS Rule for Drug-Drug Interaction
+        if not CDSRule.query.filter_by(rule_type='DrugInteraction').first():
+            interaction_rule = CDSRule(
+                rule_name="Warfarin and Aspirin Interaction Alert",
+                description="Alerts when Aspirin is ordered for a patient already on Warfarin, or vice-versa.",
+                rule_type="DrugInteraction",
+                rule_logic={
+                    "interactions": [
+                        # Each sub-list is a pair of interacting drug names (should be lowercase)
+                        ["warfarin", "aspirin"]
+                    ]
+                },
+                is_active=True
+            )
+            db.session.add(interaction_rule)
+            current_app.logger.info("Added sample Drug-Drug Interaction CDS rule.")
+
+        db.session.commit()
         return jsonify({"message": "Roles and permissions setup/updated successfully."}), 201
     except Exception as e:
         db.session.rollback()

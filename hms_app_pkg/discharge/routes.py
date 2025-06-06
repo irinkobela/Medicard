@@ -8,9 +8,6 @@ from datetime import datetime
 
 discharge_bp = Blueprint('discharge_bp', __name__)
 
-# The local helper function get_user_id_from_token_for_discharge() is removed.
-# We use g.current_user set by the permission_required decorator from utils.py.
-
 @discharge_bp.route('/patients/<string:patient_id>/discharge-plans', methods=['POST'])
 @permission_required('discharge_plan:create')
 def create_discharge_plan(patient_id):

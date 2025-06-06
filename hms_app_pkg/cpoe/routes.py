@@ -7,6 +7,9 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
+# --- NEW: Import the service function ---
+from .services import create_new_order
+
 cpoe_bp = Blueprint('cpoe_bp', __name__)
 
 @cpoe_bp.route('/orderable-items', methods=['GET'])
@@ -52,60 +55,37 @@ def create_order(patient_id):
         return jsonify({"message": "orderable_item_id and order_details are required"}), 400
 
     patient = Patient.query.get_or_404(patient_id)
-    item = OrderableItem.query.get(data['orderable_item_id'])
-    if not item:
-        return jsonify({"message": "Orderable item not found"}), 404
 
-    alerts = []
-
-    existing = Order.query.filter_by(patient_id=patient.id, orderable_item_id=item.id, status='Active').first()
-    if existing:
-        alerts.append({
-            "type": "DUPLICATE_ORDER",
-            "message": f"An active order for '{item.name}' already exists (Order ID: {existing.id}).",
-            "severity": "Warning"
-        })
-
-    if item.item_type == 'Medication':
-        for allergy in PatientAllergy.query.filter_by(patient_id=patient.id, is_active=True):
-            if item.name.lower() in allergy.allergen_name.lower() or \
-               (item.generic_name and item.generic_name.lower() in allergy.allergen_name.lower()):
-                alerts.append({
-                    "type": "ALLERGY_ALERT",
-                    "message": f"Patient allergic to '{allergy.allergen_name}' — may react to '{item.name}'. Severity: {allergy.severity}.",
-                    "severity": "Critical"
-                })
-                break
-
-    if any(alert['severity'] == 'Critical' for alert in alerts):
-        return jsonify({"message": "Order blocked by critical CDS alert(s).", "cds_alerts": alerts}), 400
-
-    order = Order(
-        patient_id=patient.id,
-        orderable_item_id=item.id,
-        order_details=data['order_details'],
-        priority=data.get('priority', 'Routine'),
-        status='PendingSignature',
-        ordering_physician_id=user.id
+    # --- UPDATED: Call the service to handle the logic ---
+    order, alerts, error_message, status_code = create_new_order(
+        patient=patient, user=user, order_data=data
     )
 
+    if error_message:
+        # If the service returned an error (like a critical alert), respond immediately
+        response_data = {"message": error_message}
+        if alerts:
+            response_data["cds_alerts"] = alerts
+        return jsonify(response_data), status_code
+
+    # If the service was successful, we can now commit the new order to the database
     try:
-        db.session.add(order)
         db.session.commit()
+
         response = {
             "message": "Order created successfully and is pending signature.",
             "order_id": order.id
         }
-        if alerts:
+        if alerts: # Include any non-critical warnings that were generated
             response["cds_warnings"] = alerts
         return jsonify(response), 201
+
     except IntegrityError:
         db.session.rollback()
+        current_app.logger.error(f"IntegrityError on order creation for patient {patient_id}")
         return jsonify({"message": "Database integrity error creating order."}), 500
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Error creating order: {e}")
-        return jsonify({"message": "Unexpected error while creating order."}), 500
+    # Note: The global handler we created in Step 1 will catch other database errors.
+
 
 @cpoe_bp.route('/patients/<string:patient_id>/orders', methods=['GET'])
 @permission_required('order:read')
@@ -115,7 +95,7 @@ def get_patient_orders(patient_id):
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
 
-    query = Order.query.options(joinedload(Order.item), joinedload(Order.ordering_physician)).filter_by(patient_id=patient.id)
+    query = Order.query.options(joinedload(Order.orderable_item), joinedload(Order.ordering_physician)).filter_by(patient_id=patient.id)
     if status:
         query = query.filter(Order.status.ilike(f'%{status}%'))
 
@@ -124,7 +104,7 @@ def get_patient_orders(patient_id):
     orders = [{
         "order_id": o.id,
         "orderable_item_id": o.orderable_item_id,
-        "orderable_item_name": o.item.name if o.item else "Unknown",
+        "orderable_item_name": o.orderable_item.name if o.orderable_item else "Unknown",
         "order_details": o.order_details,
         "status": o.status,
         "priority": o.priority,
@@ -156,13 +136,9 @@ def sign_order(order_id):
     order.signed_at = datetime.utcnow()
     order.signed_by_user_id = user.id
 
-    try:
-        db.session.commit()
-        return jsonify({"message": "Order signed successfully.", "order_id": order.id, "status": order.status}), 200
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Signing error for order {order_id}: {e}")
-        return jsonify({"message": "Error signing order."}), 500
+    db.session.commit()
+    return jsonify({"message": "Order signed successfully.", "order_id": order.id, "status": order.status}), 200
+
 
 @cpoe_bp.route('/orders/<string:order_id>/discontinue', methods=['POST'])
 @permission_required('order:discontinue')
@@ -183,10 +159,5 @@ def discontinue_order(order_id):
     order.discontinued_by_user_id = user.id
     order.discontinuation_reason = reason or 'Discontinued by physician order.'
 
-    try:
-        db.session.commit()
-        return jsonify({"message": "Order discontinued.", "order_id": order.id}), 200
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Discontinue error for order {order_id}: {e}")
-        return jsonify({"message": "Error discontinuing order."}), 500
+    db.session.commit()
+    return jsonify({"message": "Order discontinued.", "order_id": order.id}), 200

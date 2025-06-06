@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 import datetime
 import uuid
 import jwt 
+from ..audit.services import create_audit_log 
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -231,3 +232,54 @@ def reset_password():
 def get_current_user_profile():
     current_user = g.current_user
     return jsonify(current_user.to_dict(include_permissions=True, include_roles=True))
+
+@auth_bp.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    if not data: return jsonify({"message": "Request body must be JSON."}), 400
+
+    # --- FIX: Define username and password from the request data FIRST ---
+    username = data.get('username')
+    password = data.get('password')
+    if not username or not password:
+        return jsonify({"message": "Username and password are required."}), 400
+
+    user = User.query.filter_by(username=username).first()
+
+    # --- FIX: Check the password right after finding the user ---
+    if not user or not user.check_password(password):
+        # We can log the FAILED login attempt here
+        create_audit_log(
+            action="LOGIN_FAILURE",
+            change_details={"username_attempt": username, "message": "Invalid username or password."}
+        )
+        db.session.commit()
+        current_app.logger.warning(f"Failed login attempt for username: {username}")
+        return jsonify({"message": "Invalid username or password."}), 401
+
+    if not user.is_active:
+        current_app.logger.warning(f"Inactive user login attempt: {username}")
+        return jsonify({"message": "User account is inactive."}), 403
+
+    if user.mfa_enabled:
+        # MFA logic is correct as is
+        current_app.logger.info(f"MFA required for user: {username}")
+        return jsonify({"message": "MFA verification required.", "mfa_required": True, "user_id": user.id}), 202
+
+   #The audit log for SUCCESSFUL login now goes HERE ---
+    # The user has been fully authenticated at this point.
+    g.current_user = user # Set the user in 'g' so our audit service can find it
+    create_audit_log(action="LOGIN_SUCCESS")
+    db.session.commit() # Commit the audit log entry
+
+    user_permissions = user.get_permissions()
+    access_token = create_access_token(user_id=user.id, user_permissions=user_permissions)
+    refresh_token_str = create_refresh_token(user_id=user.id)
+
+    current_app.logger.info(f"User '{username}' logged in successfully.")
+    return jsonify({
+        "message": "Login successful.",
+        "access_token": access_token,
+        "refresh_token": refresh_token_str,
+        "user": user.to_dict(include_permissions=True, include_roles=True)
+    }), 200

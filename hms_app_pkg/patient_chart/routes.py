@@ -4,6 +4,9 @@ from .. import db
 from ..models import Patient, ClinicalNote, PatientAllergy # Add other relevant models like PatientProblemList
 from ..utils import permission_required
 import datetime
+from ..models import VitalSign, PatientFlag, PatientProblemList, PatientMedication, LabResult
+from sqlalchemy import or_
+from datetime import date, datetime, timedelta
 
 patient_chart_bp = Blueprint('patient_chart_bp', __name__)
 
@@ -191,3 +194,73 @@ def sign_clinical_note(note_id): # current_user_id from decorator
     return jsonify({"message": "Note signed successfully", "note_id": note.id}), 200
 
 # Add other patient_chart related routes here (e.g., for problems, allergies)
+@patient_chart_bp.route('/patients/<string:patient_id>/summary', methods=['GET'])
+@permission_required('patient:read:summary') # We will add this new permission next
+def get_patient_summary(patient_id):
+    """
+    Aggregates a high-level summary of a single patient's current status.
+    """
+    patient = Patient.query.get_or_404(patient_id)
+
+    # 1. Patient Header (Demographics, Allergies, etc.)
+    patient_age = None
+    if patient.date_of_birth:
+        today = date.today()
+        patient_age = today.year - patient.date_of_birth.year - ((today.month, today.day) < (patient.date_of_birth.month, patient.date_of_birth.day))
+
+    allergies_list = [a.allergen_name for a in PatientAllergy.query.filter_by(patient_id=patient.id, is_active=True).all()]
+
+    patient_header = {
+        "id": patient.id,
+        "mrn": patient.mrn,
+        "full_name": f"{patient.first_name} {patient.last_name}",
+        "age": patient_age,
+        "gender": patient.gender,
+        "date_of_birth": patient.date_of_birth.isoformat() if patient.date_of_birth else None,
+        "code_status": patient.code_status,
+        "allergies": allergies_list
+    }
+
+    # 2. Get latest vital signs
+    latest_vitals = VitalSign.query.filter_by(patient_id=patient.id).order_by(VitalSign.recorded_at.desc()).first()
+
+    # 3. Get active patient flags
+    active_flags = PatientFlag.query.filter_by(patient_id=patient.id, is_active=True).all()
+    flags_summary = [flag.to_dict() for flag in active_flags]
+
+    # 4. Get active problem list
+    active_problems = PatientProblemList.query.filter_by(patient_id=patient.id, status='Active').order_by(PatientProblemList.recorded_at.desc()).all()
+    problems_summary = [{
+        "problem_id": p.id,
+        "problem_description": p.problem_description,
+        "onset_date": p.onset_date.isoformat() if p.onset_date else None,
+    } for p in active_problems]
+
+    # 5. Get active inpatient medications
+    active_meds = PatientMedication.query.filter(
+        PatientMedication.patient_id == patient.id,
+        PatientMedication.status == 'Active',
+        PatientMedication.type == 'INPATIENT_ACTIVE'
+    ).all()
+    meds_summary = [med.to_dict() for med in active_meds]
+
+    # 6. Get recent critical labs (last 48 hours)
+    two_days_ago = datetime.utcnow() - timedelta(days=2)
+    critical_labs = LabResult.query.filter(
+        LabResult.patient_id == patient.id,
+        LabResult.result_datetime >= two_days_ago,
+        or_(LabResult.abnormal_flag.ilike('%critical%'), LabResult.abnormal_flag.ilike('%panic%'))
+    ).order_by(LabResult.result_datetime.desc()).all()
+    labs_summary = [lab.to_dict() for lab in critical_labs]
+
+    # 7. Assemble the final summary payload
+    summary_data = {
+        "patient_header": patient_header,
+        "latest_vitals": latest_vitals.to_dict() if latest_vitals else None,
+        "active_flags": flags_summary,
+        "active_problems": problems_summary,
+        "active_medications": meds_summary,
+        "recent_critical_labs": labs_summary
+    }
+
+    return jsonify(summary_data)

@@ -201,6 +201,9 @@ class OrderableItem(db.Model):
     generic_name = db.Column(db.String(255), nullable=True)
     code = db.Column(db.String(50), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
+    min_dose = db.Column(db.Float, nullable=True)
+    max_dose = db.Column(db.Float, nullable=True)
+    default_dose_unit = db.Column(db.String(50), nullable=True) # e.g., 'mg', 'g', 'mcg'
 
     parent_id = db.Column(db.String(36), db.ForeignKey('orderable_items.id'), nullable=True)
 
@@ -1185,3 +1188,68 @@ class Appointment(db.Model):
             f"<Appointment {self.id} | Patient {self.patient_id} | "
             f"Provider {self.provider_user_id} @ {self.start_datetime}>"
         )
+
+class MedicationAdministration(db.Model):
+    __tablename__ = 'medication_administrations'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=False, index=True)
+    # This links the administration back to the specific medication that was ordered
+    patient_medication_id = db.Column(db.String(36), db.ForeignKey('patient_medications.id'), nullable=False, index=True)
+    administered_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+
+    administration_time = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+    # The status of the administration event itself
+    status = db.Column(db.String(50), nullable=False) # e.g., 'Given', 'Held', 'Patient Refused'
+
+    # The actual dose given, to account for cases where it differs from the order
+    dose_given = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True) # e.g., "Patient tolerated well."
+
+    # Relationships to link this table to others
+    patient = db.relationship('Patient', backref='med_administrations')
+    patient_medication = db.relationship('PatientMedication', backref='administrations')
+    administered_by = db.relationship('User', backref='med_administrations_given')
+
+    def to_dict(self):
+        """Serializes the object to a dictionary."""
+        return {
+            "id": self.id,
+            "patient_id": self.patient_id,
+            "patient_medication_id": self.patient_medication_id,
+            "medication_name": self.patient_medication.medication_name if self.patient_medication else "Unknown",
+            "administered_by_user_id": self.administered_by_user_id,
+            "administered_by_username": self.administered_by.username if self.administered_by else None,
+            "administration_time": self.administration_time.isoformat(),
+            "status": self.status,
+            "dose_given": self.dose_given,
+            "notes": self.notes
+        }
+    
+class AuditLog(db.Model):
+    __tablename__ = 'audit_logs'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    user_username = db.Column(db.String(80), nullable=True)
+    action = db.Column(db.String(100), nullable=False, index=True)
+    target_model = db.Column(db.String(100), nullable=True)
+    target_id = db.Column(db.String(36), nullable=True)
+    change_details = db.Column(db.JSON, nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)
+    user_agent = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "user_username": self.user_username,
+            "action": self.action,
+            "target_model": self.target_model,
+            "target_id": self.target_id,
+            "change_details": self.change_details,
+            "ip_address": self.ip_address,
+            "user_agent": self.user_agent,
+            "timestamp": self.timestamp.isoformat()
+        }

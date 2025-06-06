@@ -7,10 +7,11 @@ from flask import current_app
 from . import db  # Imports db from hms_app_pkg/__init__.py
 from .models import Notification, User, Patient # Import all necessary models
 from sqlalchemy import and_
+from .sockets import socketio
 
 # --- Notification Services ---
 
-def create_notification( # Renamed for clarity as a service function
+def create_notification( 
     recipient_user_ids,
     message_template,
     template_context=None,
@@ -98,7 +99,11 @@ def create_notification( # Renamed for clarity as a service function
         for n in notifications_to_add: # Convert to dict after successful commit (so IDs are populated)
             sent_notifications_data.append(n.to_dict())
             current_app.logger.info(f"[NotificationService] Created: ID {n.id} for User {n.recipient_user_id}, Type '{n.notification_type}'")
-        # Here you could also trigger real-time push notifications
+            socketio.emit(
+                'new_notification',         # The name of the event the client will listen for
+                n.to_dict(),                # The data payload (the notification itself)
+                room=n.recipient_user_id
+            )
         return sent_notifications_data
     except Exception as e:
         db.session.rollback()

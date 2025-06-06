@@ -1,8 +1,12 @@
 # hms_app_pkg/__init__.py
-from flask import Flask
+from flask import Flask , jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate # Optional: For database migrations
 from dotenv import load_dotenv
+from sqlalchemy.exc import SQLAlchemyError
+from werkzeug.exceptions import NotFound
+from .sockets import socketio
+
 
 # Load environment variables from .env file.
 # This should be called as early as possible.
@@ -39,6 +43,8 @@ def create_app(config_name='development'):
     # Initialize extensions
     db.init_app(app)
     migrate.init_app(app, db)
+    socketio.init_app(app)
+
 
     # Import and register Blueprints
     from .auth.routes import auth_bp
@@ -86,7 +92,19 @@ def create_app(config_name='development'):
     from .reports.routes import reports_bp
     app.register_blueprint(reports_bp, url_prefix='/api')
 
-    # from .stats.routes import stats_bp
+    from .dashboard.routes import dashboard_bp
+    app.register_blueprint(dashboard_bp, url_prefix='/api')
+
+    from .cds.routes import cds_bp
+    app.register_blueprint(cds_bp, url_prefix='/api')
+
+    from .mar.routes import mar_bp
+    app.register_blueprint(mar_bp, url_prefix='/api')
+
+    from .timeline.routes import timeline_bp
+    app.register_blueprint(timeline_bp, url_prefix='/api')
+    
+    #  from .stats.routes import stats_bp
     # app.register_blueprint(stats_bp, url_prefix='/api')
 
     # from .profile.routes import profile_bp
@@ -96,5 +114,29 @@ def create_app(config_name='development'):
     @app.route('/health')
     def health_check():
         return "HMS App is healthy!", 200
+    
+    # This section adds centralized error handling for the whole app.
+    @app.errorhandler(SQLAlchemyError)
+    def handle_database_error(e):
+        """Catches and handles all SQLAlchemy-related database errors."""
+        # Log the error so you can see it in your server logs
+        app.logger.error(f"Database Error: {e}")
+        # Rollback the session to prevent hanging transactions
+        db.session.rollback()
+        # Return a clean, user-friendly JSON response
+        return jsonify({"error": "A database error occurred."}), 500
 
+    @app.errorhandler(NotFound)
+    def handle_not_found_error(e):
+        """Handles 404 Not Found errors, like when a URL is wrong."""
+        app.logger.warning(f"Not Found Error: {e}")
+        return jsonify({"error": "The requested resource was not found."}), 404
+
+    @app.errorhandler(Exception)
+    def handle_generic_error(e):
+        """A fallback handler for any other unexpected errors."""
+        # Log the full traceback to help with debugging
+        app.logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        # Return a generic error message so we don't expose internal details
+        return jsonify({"error": "An unexpected server error occurred."}), 500
     return app
