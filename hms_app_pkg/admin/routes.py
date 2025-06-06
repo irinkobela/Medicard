@@ -209,8 +209,7 @@ def setup_roles_permissions():
                 'user:profile:read', 'user:logout',
                 'dashboard:read',
                 'cds:execute',
-                'mar:read', # <-- ADD
-            'mar:document_administration',
+                'mar:read', 'mar:document_administration', 'patient:read:timeline',
             ],
             'Resident': [
                 'patient:read', 'patient:read:own', 'patient:read:summary'
@@ -227,7 +226,7 @@ def setup_roles_permissions():
                 'result:read:lab', 'result:read:imaging', 'result:read:consult',
                 'result:acknowledge:lab', 'result:acknowledge:imaging', 'result:acknowledge:consult', # Can acknowledge routine results
                 'appointment:read:own', 'mar:read', # <-- ADD
-            'mar:document_administration',
+            'mar:document_administration', 'patient:read:timeline',
                 'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
             ],
             'Nurse': [
@@ -243,7 +242,7 @@ def setup_roles_permissions():
                 'notification:read', 'notification:update', 'notification:delete',
                 'result:read:lab', 'result:acknowledge:lab', # Acknowledge routine labs
                 'appointment:read', # View patient appointments 
-            'mar:document_administration', 'mar:read', 
+            'mar:document_administration', 'mar:read', 'patient:read:timeline',
                 'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute'
             ],
             'Pharmacist': [ 
