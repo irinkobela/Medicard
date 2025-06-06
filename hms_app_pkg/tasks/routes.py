@@ -1,26 +1,24 @@
 # hms_app_pkg/tasks/routes.py
-from flask import Blueprint, request, jsonify, current_app, g # Import g
+from flask import Blueprint, request, jsonify, current_app, g
 from .. import db
 from ..models import Task, User, Patient
-from ..utils import permission_required # decode_access_token is used by permission_required in utils.py
+from ..utils import permission_required
+from ..services import create_notification # <<< IMPORT THE NOTIFICATION SERVICE
 from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import IntegrityError
 import datetime
-import uuid # Not strictly needed here if Task model handles UUID generation
 
 tasks_bp = Blueprint('tasks_bp', __name__)
 
-# The local helper function get_user_id_from_token_for_tasks() is NOW REMOVED.
+# The local helper function get_user_id_from_token_for_tasks() is removed.
 # We will use g.current_user set by the permission_required decorator from utils.py.
 
 @tasks_bp.route('/tasks', methods=['POST'])
 @permission_required('task:create') 
 def create_task():
-    # g.current_user is set by the permission_required decorator
     user_creating = g.current_user 
-    if not user_creating: # Should be caught by decorator, but an extra check
+    if not user_creating:
         return jsonify({"message": "Authentication error, current user not found."}), 401
-
 
     data = request.get_json()
     if not data or not data.get('title') or not data.get('assigned_to_user_id'):
@@ -31,54 +29,70 @@ def create_task():
         return jsonify({"message": "Assigned user not found."}), 404
 
     patient_id = data.get('patient_id')
-    if patient_id:
-        patient = Patient.query.get(patient_id)
-        if not patient:
-            return jsonify({"message": "Patient not found."}), 404
+    if patient_id and not Patient.query.get(patient_id):
+        return jsonify({"message": "Patient not found."}), 404
     
     due_datetime_val = None
     if data.get('due_datetime'):
         try:
             due_datetime_str = data['due_datetime']
+            if not isinstance(due_datetime_str, str): raise ValueError("Date must be a string")
             if '.' in due_datetime_str:
                 due_datetime_val = datetime.datetime.strptime(due_datetime_str, '%Y-%m-%dT%H:%M:%S.%f')
             else:
                 due_datetime_val = datetime.datetime.strptime(due_datetime_str, '%Y-%m-%dT%H:%M:%S')
-        except ValueError:
-            return jsonify({"message": "Invalid due_datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SS.ffffff)."}), 400
+        except (ValueError, TypeError):
+            return jsonify({"message": "Invalid due_datetime format. Use ISO format."}), 400
 
     try:
         new_task = Task(
             title=data['title'],
-            assigned_to_user_id=data['assigned_to_user_id'],
-            created_by_user_id=user_creating.id, # Use ID from g.current_user
+            assigned_to_user_id=assigned_user.id,
+            created_by_user_id=user_creating.id,
             description=data.get('description'),
             patient_id=patient_id,
             due_datetime=due_datetime_val,
             priority=data.get('priority', 'Normal'),
-            category=data.get('category'),      # From updated Task model
-            department=data.get('department'),  # From updated Task model
-            status=data.get('status', 'Pending'), # From updated Task model
-            is_urgent=data.get('is_urgent', False),# From updated Task model
-            visibility=data.get('visibility', 'private') # From updated Task model
+            category=data.get('category'),
+            department=data.get('department'),
+            status=data.get('status', 'Pending'),
+            is_urgent=data.get('is_urgent', False),
+            visibility=data.get('visibility', 'private')
         )
         db.session.add(new_task)
         db.session.commit()
+
+        # --- NOTIFICATION TRIGGER LOGIC ---
+        # If a user assigns a task to someone else, notify the assignee.
+        if new_task.assigned_to_user_id != user_creating.id:
+            create_notification(
+                recipient_user_ids=new_task.assigned_to_user_id,
+                message_template="You have been assigned a new task by {creator_name}: '{task_title}'",
+                template_context={
+                    "creator_name": user_creating.full_name or user_creating.username,
+                    "task_title": new_task.title
+                },
+                notification_type="NEW_TASK_ASSIGNMENT",
+                link_to_item_type="Task",
+                link_to_item_id=new_task.id,
+                related_patient_id=new_task.patient_id,
+                is_urgent=new_task.is_urgent
+            )
+        # --- END NOTIFICATION TRIGGER ---
+            
         return jsonify({"message": "Task created successfully", "task": new_task.to_dict()}), 201
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify({"message": "Database integrity error creating task."}), 400
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Unexpected error creating task: {e}")
-        return jsonify({"message": "An unexpected error occurred creating task."}), 500
+        current_app.logger.error(f"Error creating task: {e}")
+        return jsonify({"message": "An unexpected error occurred while creating the task."}), 500
 
 
 @tasks_bp.route('/tasks', methods=['GET'])
-@permission_required('task:read:own') # Base permission
+@permission_required('task:read:own')
 def get_tasks():
     current_user = g.current_user
-    requesting_user_permissions = g.token_permissions # Permissions from token set by utils.py
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
+    can_read_any = 'task:read:any' in requesting_user_permissions
 
     query = Task.query.options(joinedload(Task.assigned_to), joinedload(Task.created_by))
     
@@ -86,9 +100,7 @@ def get_tasks():
     patient_id_filter = request.args.get('patient_id')
     completed_filter_str = request.args.get('completed')
     priority_filter = request.args.get('priority')
-    department_filter = request.args.get('department') # New filter from user's code
-
-    can_read_any = 'task:read:any' in requesting_user_permissions
+    department_filter = request.args.get('department')
 
     if assigned_to_filter:
         if assigned_to_filter.lower() == 'me':
@@ -101,12 +113,11 @@ def get_tasks():
             except ValueError:
                 return jsonify({"message": "Invalid assigned_to_user_id filter format."}), 400
     elif patient_id_filter:
-        # More complex logic might be needed if 'task:read:own' means only tasks for *my* patients
         if not can_read_any:
              query = query.filter(Task.patient_id == patient_id_filter, Task.assigned_to_user_id == current_user.id)
-        else: # User has 'task:read:any'
+        else:
             query = query.filter(Task.patient_id == patient_id_filter)
-    elif not can_read_any: # Default for users with only 'task:read:own'
+    elif not can_read_any:
         query = query.filter(Task.assigned_to_user_id == current_user.id)
 
     if completed_filter_str is not None:
@@ -124,8 +135,10 @@ def get_tasks():
     
     return jsonify({
         "tasks": [task.to_dict() for task in tasks_pagination.items],
-        "total": tasks_pagination.total, "page": tasks_pagination.page,
-        "per_page": tasks_pagination.per_page, "pages": tasks_pagination.pages
+        "total": tasks_pagination.total,
+        "page": tasks_pagination.page,
+        "per_page": tasks_pagination.per_page,
+        "pages": tasks_pagination.pages
     }), 200
 
 @tasks_bp.route('/tasks/<string:task_id>', methods=['GET'])
@@ -134,14 +147,13 @@ def get_task(task_id):
     current_user = g.current_user
     task = Task.query.options(joinedload(Task.assigned_to), joinedload(Task.created_by)).get_or_404(task_id)
     
-    requesting_user_permissions = g.token_permissions
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
     can_read_any = 'task:read:any' in requesting_user_permissions
 
     if not (task.assigned_to_user_id == current_user.id or \
             task.created_by_user_id == current_user.id or \
             can_read_any or \
-            (task.visibility == 'public' # Add more visibility logic if needed
-            )):
+            (task.visibility == 'public')):
         return jsonify({"message": "Unauthorized to view this specific task."}), 403
         
     return jsonify(task.to_dict()), 200
@@ -152,7 +164,7 @@ def update_task(task_id):
     current_user = g.current_user
     task = Task.query.get_or_404(task_id)
     
-    requesting_user_permissions = g.token_permissions
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
     can_update_any = 'task:update:any' in requesting_user_permissions
 
     if not (task.assigned_to_user_id == current_user.id or \
@@ -163,7 +175,10 @@ def update_task(task_id):
     data = request.get_json()
     if not data: return jsonify({"message": "No update data provided"}), 400
     
-    # Update fields from your extended Task model
+    # Check if a notification is needed for re-assignment
+    old_assignee = task.assigned_to_user_id
+    new_assignee = data.get('assigned_to_user_id')
+    
     if 'title' in data: task.title = data['title']
     if 'description' in data: task.description = data['description']
     if 'priority' in data: task.priority = data['priority']
@@ -174,24 +189,19 @@ def update_task(task_id):
     if 'visibility' in data: task.visibility = data['visibility']
     
     if 'assigned_to_user_id' in data:
-        if data['assigned_to_user_id'] is not None: # Allow unassigning by passing null
-            assigned_user = User.query.get(data['assigned_to_user_id'])
-            if not assigned_user: return jsonify({"message": "New assigned user not found."}), 404
-            task.assigned_to_user_id = data['assigned_to_user_id']
+        if new_assignee is not None:
+            if not User.query.get(new_assignee):
+                return jsonify({"message": "New assigned user not found."}), 404
+            task.assigned_to_user_id = new_assignee
         else:
             task.assigned_to_user_id = None
-
 
     if 'due_datetime' in data:
         if data['due_datetime'] is None:
             task.due_datetime = None
         else:
             try:
-                due_datetime_str = data['due_datetime']
-                if '.' in due_datetime_str:
-                    task.due_datetime = datetime.datetime.strptime(due_datetime_str, '%Y-%m-%dT%H:%M:%S.%f')
-                else:
-                    task.due_datetime = datetime.datetime.strptime(due_datetime_str, '%Y-%m-%dT%H:%M:%S')
+                task.due_datetime = datetime.datetime.fromisoformat(data['due_datetime'].replace('Z', '+00:00'))
             except (ValueError, TypeError):
                 return jsonify({"message": "Invalid due_datetime format."}), 400
     
@@ -199,22 +209,39 @@ def update_task(task_id):
         if data['completed'] and not task.completed:
             task.completed = True
             task.completed_at = datetime.datetime.utcnow()
-            task.status = "Completed" # Also update status
+            task.status = "Completed"
         elif not data['completed'] and task.completed:
             task.completed = False
             task.completed_at = None
-            if task.status == "Completed": task.status = "In Progress" # Or "Pending"
+            if task.status == "Completed": task.status = "In Progress"
             
-    if task.status == "Completed" and not task.completed : # If status is set to completed directly
+    if task.status == "Completed" and not task.completed:
         task.completed = True
         if not task.completed_at: task.completed_at = datetime.datetime.utcnow()
-    elif task.status != "Completed" and task.completed: # If status changed from completed
+    elif task.status != "Completed" and task.completed:
         task.completed = False
         task.completed_at = None
 
-
     task.updated_at = datetime.datetime.utcnow()
     db.session.commit()
+
+    # --- NOTIFICATION TRIGGER FOR RE-ASSIGNMENT ---
+    if new_assignee is not None and new_assignee != old_assignee and new_assignee != current_user.id:
+        create_notification(
+            recipient_user_ids=new_assignee,
+            message_template="Task '{task_title}' has been re-assigned to you by {modifier_name}.",
+            template_context={
+                "task_title": task.title,
+                "modifier_name": current_user.full_name or current_user.username
+            },
+            notification_type="TASK_ASSIGNMENT",
+            link_to_item_type="Task",
+            link_to_item_id=task.id,
+            related_patient_id=task.patient_id,
+            is_urgent=task.is_urgent
+        )
+    # --- END NOTIFICATION TRIGGER ---
+
     return jsonify({"message": "Task updated successfully", "task": task.to_dict()}), 200
 
 @tasks_bp.route('/tasks/<string:task_id>', methods=['DELETE'])
@@ -223,7 +250,7 @@ def delete_task(task_id):
     current_user = g.current_user
     task = Task.query.get_or_404(task_id)
     
-    requesting_user_permissions = g.token_permissions
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
     can_delete_any = 'task:delete:any' in requesting_user_permissions
 
     if not (task.created_by_user_id == current_user.id or can_delete_any):
@@ -233,14 +260,13 @@ def delete_task(task_id):
     db.session.commit()
     return jsonify({"message": "Task deleted successfully"}), 200
 
-
-@tasks_bp.route('/tasks/<string:task_id>/complete', methods=['PATCH']) # Changed to PATCH
+@tasks_bp.route('/tasks/<string:task_id>/complete', methods=['PATCH'])
 @permission_required('task:update:own') 
 def mark_task_complete(task_id):
     current_user = g.current_user
     task = Task.query.get_or_404(task_id)
 
-    requesting_user_permissions = g.token_permissions
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
     can_update_any = 'task:update:any' in requesting_user_permissions
 
     if not (task.assigned_to_user_id == current_user.id or \
@@ -264,7 +290,7 @@ def update_task_status(task_id):
     current_user = g.current_user
     task = Task.query.get_or_404(task_id)
     
-    requesting_user_permissions = g.token_permissions
+    requesting_user_permissions = getattr(g, 'token_permissions', [])
     can_update_any = 'task:update:any' in requesting_user_permissions
 
     if not (task.assigned_to_user_id == current_user.id or \
@@ -282,7 +308,7 @@ def update_task_status(task_id):
     if new_status == 'Completed':
         task.completed = True
         if not task.completed_at: task.completed_at = datetime.datetime.utcnow()
-    elif task.completed and new_status != 'Completed': # If un-completing
+    elif task.completed and new_status != 'Completed':
         task.completed = False
         task.completed_at = None
     
@@ -291,18 +317,14 @@ def update_task_status(task_id):
     return jsonify({"message": f"Task status updated to {new_status}", "task": task.to_dict()}), 200
 
 @tasks_bp.route('/tasks/summary', methods=['GET'])
-@permission_required('task:read:any') # Summary typically requires broader view
+@permission_required('task:read:any')
 def task_summary():
-    # Add filtering based on current_user if not admin, e.g. tasks for user's department
-    # For now, global summary if 'task:read:any'
-    
     total = Task.query.count()
     pending = Task.query.filter_by(status='Pending', completed=False).count()
     in_progress = Task.query.filter_by(status='In Progress', completed=False).count()
     completed_count = Task.query.filter_by(status='Completed', completed=True).count()
     cancelled = Task.query.filter_by(status='Cancelled').count()
     on_hold = Task.query.filter_by(status='On Hold').count()
-
 
     return jsonify({
         "total_tasks": total,
@@ -319,9 +341,8 @@ def task_summary():
 @permission_required('task:read:own')
 def get_today_tasks():
     current_user = g.current_user
-
-    today_start = datetime.combine(datetime.date.today(), datetime.time.min) # Use datetime.date.today()
-    today_end = datetime.combine(datetime.date.today(), datetime.time.max)
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.datetime.min.time())
+    today_end = datetime.datetime.combine(datetime.date.today(), datetime.datetime.max.time())
 
     tasks = Task.query.filter(
         Task.assigned_to_user_id == current_user.id,

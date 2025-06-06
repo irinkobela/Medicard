@@ -1,75 +1,13 @@
 # hms_app_pkg/results/routes.py
-from flask import Blueprint, request, jsonify, current_app, g # Import g
+from flask import Blueprint, request, jsonify, current_app, g
 from .. import db
-from ..models import Patient, LabResult, ImagingReport, User # Ensure User is imported for relationship checks
-from ..utils import permission_required # decode_access_token is used by permission_required in utils.py
+from ..models import Patient, LabResult, ImagingReport, User
+from ..utils import permission_required
+from datetime import datetime
 from sqlalchemy.exc import IntegrityError
-import datetime
+from ..services import create_notification
 
 results_bp = Blueprint('results_bp', __name__)
-
-# The local helper function get_user_id_from_token() is removed.
-# We will use g.current_user set by the permission_required decorator from utils.py.
-
-# --- Lab Results Routes ---
-@results_bp.route('/patients/<string:patient_id>/results/labs', methods=['POST'])
-@permission_required('result:create:lab')
-def create_lab_result(patient_id):
-    current_user = g.current_user # Available if needed to set e.g. a 'created_by_user_id' on LabResult model
-    patient = Patient.query.get_or_404(patient_id)
-    data = request.get_json()
-
-    required_fields = ['test_name', 'value', 'collection_datetime']
-    if not all(field in data for field in required_fields):
-        return jsonify({"message": "Missing required fields: test_name, value, collection_datetime"}), 400
-
-    try:
-        collection_dt_str = data['collection_datetime']
-        if not isinstance(collection_dt_str, str): raise ValueError("Datetime must be a string.")
-        if '.' in collection_dt_str:
-            collection_dt = datetime.datetime.strptime(collection_dt_str, '%Y-%m-%dT%H:%M:%S.%f')
-        else:
-            collection_dt = datetime.datetime.strptime(collection_dt_str, '%Y-%m-%dT%H:%M:%S')
-    except (ValueError, TypeError) as e:
-        current_app.logger.error(f"Invalid collection_datetime format: {data.get('collection_datetime')}, Error: {e}")
-        return jsonify({"message": "Invalid collection_datetime format. Use ISO format (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SS.ffffff)."}), 400
-
-    value_numeric = None
-    if 'value' in data: # Ensure 'value' key exists
-        try:
-            if isinstance(data['value'], (int, float)) or \
-               (isinstance(data['value'], str) and data['value'].replace('.', '', 1).replace('-', '', 1).isdigit()):
-                value_numeric = float(data['value'])
-        except (ValueError, TypeError):
-            pass # value is not numeric, value_numeric remains None
-    
-    try:
-        new_result = LabResult(
-            patient_id=patient.id,
-            test_name=data['test_name'],
-            panel_name=data.get('panel_name'),
-            value=str(data['value']), # Ensure value is stored as string
-            value_numeric=value_numeric,
-            units=data.get('units'),
-            reference_range=data.get('reference_range'),
-            abnormal_flag=data.get('abnormal_flag'),
-            status=data.get('status', 'Final'),
-            collection_datetime=collection_dt,
-            result_datetime=datetime.datetime.utcnow() # Or from data if LIS provides it
-            # ordered_test_id=data.get('ordered_test_id') # If linking to an OrderableItem
-        )
-        db.session.add(new_result)
-        db.session.commit()
-        # Potentially trigger a notification if critical using services.create_notification
-        return jsonify({"message": "Lab result created successfully", "result": new_result.to_dict()}), 201
-    except IntegrityError:
-        db.session.rollback()
-        current_app.logger.error("IntegrityError creating lab result.")
-        return jsonify({"message": "Database integrity error creating lab result."}), 400
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(f"Unexpected error creating lab result: {e}")
-        return jsonify({"message": "An unexpected error occurred."}), 500
 
 
 @results_bp.route('/patients/<string:patient_id>/results/labs', methods=['GET'])
@@ -98,6 +36,85 @@ def get_lab_results(patient_id):
         "per_page": results_pagination.per_page,
         "pages": results_pagination.pages
     }), 200
+@results_bp.route('/patients/<string:patient_id>/results/labs', methods=['POST'])
+@permission_required('result:create:lab')
+def create_lab_result(patient_id):
+    patient = Patient.query.get_or_404(patient_id)
+    data = request.get_json()
+
+    required_fields = ['test_name', 'value', 'collection_datetime']
+    if not all(field in data for field in required_fields):
+        return jsonify({"message": "Missing required fields: test_name, value, collection_datetime"}), 400
+
+    try:
+        collection_dt_str = data['collection_datetime']
+        if not isinstance(collection_dt_str, str): raise ValueError("Datetime must be a string.")
+        if '.' in collection_dt_str:
+            collection_dt = datetime.strptime(collection_dt_str, '%Y-%m-%dT%H:%M:%S.%f')
+        else:
+            collection_dt = datetime.strptime(collection_dt_str, '%Y-%m-%dT%H:%M:%S')
+    except (ValueError, TypeError) as e:
+        current_app.logger.error(f"Invalid collection_datetime format: {data.get('collection_datetime')}, Error: {e}")
+        return jsonify({"message": "Invalid collection_datetime format. Use ISO format."}), 400
+
+    value_numeric = None
+    if 'value' in data:
+        try:
+            if isinstance(data['value'], (int, float)) or \
+               (isinstance(data['value'], str) and data['value'].replace('.', '', 1).replace('-', '', 1).isdigit()):
+                value_numeric = float(data['value'])
+        except (ValueError, TypeError):
+            pass
+
+    try:
+        new_result = LabResult(
+            patient_id=patient.id,
+            test_name=data['test_name'],
+            panel_name=data.get('panel_name'),
+            value=str(data['value']),
+            value_numeric=value_numeric,
+            units=data.get('units'),
+            reference_range=data.get('reference_range'),
+            abnormal_flag=data.get('abnormal_flag'),
+            status=data.get('status', 'Final'),
+            collection_datetime=collection_dt,
+            result_datetime=datetime.utcnow()
+        )
+        db.session.add(new_result)
+        db.session.commit() # Commit to get the new_result.id
+
+        # --- NOTIFICATION TRIGGER LOGIC ---
+        # Check if the result is critical and there's an attending physician to notify.
+        if new_result.abnormal_flag and 'CRITICAL' in new_result.abnormal_flag.upper() and patient.attending_physician_id:
+            attending_physician_id = patient.attending_physician_id
+            patient_name = f"{patient.first_name} {patient.last_name}"
+
+            # Call the notification service
+            create_notification(
+                recipient_user_ids=attending_physician_id,
+                message_template="Critical Lab for {patient_name}: {test_name} is {value} {units}.",
+                template_context={
+                    "patient_name": patient_name,
+                    "test_name": new_result.test_name,
+                    "value": new_result.value,
+                    "units": new_result.units
+                },
+                notification_type="CRITICAL_LAB_RESULT",
+                link_to_item_type="LabResult", # For frontend navigation
+                link_to_item_id=new_result.id,
+                related_patient_id=patient.id,
+                is_urgent=True
+            )
+        # --- END NOTIFICATION TRIGGER ---
+        
+        return jsonify({"message": "Lab result created successfully", "result": new_result.to_dict()}), 201
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"message": "Database integrity error creating lab result."}), 400
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Unexpected error creating lab result: {e}")
+        return jsonify({"message": "An unexpected error occurred."}), 500
 
 # --- Imaging Reports Routes ---
 @results_bp.route('/patients/<string:patient_id>/results/imaging', methods=['POST'])
@@ -113,9 +130,9 @@ def create_imaging_report(patient_id):
         study_dt_str = data['study_datetime']
         if not isinstance(study_dt_str, str): raise ValueError("Datetime must be string.")
         if '.' in study_dt_str:
-            study_dt = datetime.datetime.strptime(study_dt_str, '%Y-%m-%dT%H:%M:%S.%f')
+            study_dt = datetime.strptime(study_dt_str, '%Y-%m-%dT%H:%M:%S.%f')
         else:
-            study_dt = datetime.datetime.strptime(study_dt_str, '%Y-%m-%dT%H:%M:%S')
+            study_dt = datetime.strptime(study_dt_str, '%Y-%m-%dT%H:%M:%S')
     except (ValueError, TypeError) as e:
         current_app.logger.error(f"Invalid study_datetime format: {data.get('study_datetime')}, Error: {e}")
         return jsonify({"message": "Invalid study_datetime format. Use ISO format."}), 400
@@ -129,7 +146,7 @@ def create_imaging_report(patient_id):
             report_text=data['report_text'],
             impression_text=data.get('impression_text'),
             status=data.get('status', 'Final'),
-            report_datetime=datetime.datetime.utcnow()
+            report_datetime=datetime.utcnow()
             # ordered_study_id=data.get('ordered_study_id') # If linking to OrderableItem
             # reported_by_user_id=current_user.id # If user directly creates it, vs. system
         )
@@ -186,7 +203,7 @@ def acknowledge_lab_result(result_id):
     if result.acknowledged_at:
         return jsonify({"message": "Lab result already acknowledged.", "result": result.to_dict()}), 400 # Or 200 if not an error
 
-    result.acknowledged_at = datetime.datetime.utcnow()
+    result.acknowledged_at = datetime.utcnow()
     result.acknowledged_by_user_id = current_user.id
     try:
         db.session.commit()
@@ -210,7 +227,7 @@ def acknowledge_imaging_report(report_id):
     if report.acknowledged_at:
         return jsonify({"message": "Imaging report already acknowledged.", "report": report.to_dict()}), 400 # Or 200
 
-    report.acknowledged_at = datetime.datetime.utcnow()
+    report.acknowledged_at = datetime.utcnow()
     report.acknowledged_by_user_id = current_user.id
     try:
         db.session.commit()

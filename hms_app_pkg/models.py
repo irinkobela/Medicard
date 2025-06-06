@@ -2,6 +2,8 @@ from . import db # Imports the db instance from __init__.py
 from werkzeug.security import generate_password_hash, check_password_hash
 import datetime
 import uuid
+from sqlalchemy import Column, String, ForeignKey
+from sqlalchemy.orm import relationship
 # --- Association Tables (Many-to-Many) ---
 user_roles = db.Table('user_roles',
     db.Column('user_id', db.Integer, db.ForeignKey('users.id'), primary_key=True),
@@ -113,6 +115,9 @@ class Patient(db.Model):
     isolation_precautions = db.Column(db.String(100), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    admission_date = db.Column(db.DateTime, nullable=True)
+    discharge_date = db.Column(db.DateTime, nullable=True)
+
 
     known_cad = db.Column(db.Boolean, default=False, nullable=True) # Coronary Artery Disease
     congestive_heart_failure = db.Column(db.Boolean, default=False, nullable=True)
@@ -128,8 +133,13 @@ class Patient(db.Model):
     orders = db.relationship('Order', backref='patient', lazy='dynamic')
     allergies = db.relationship('PatientAllergy', backref='patient', lazy='dynamic')
     # Add backrefs for new models if they were in your previous version of models.py
-    medications = db.relationship('PatientMedication', backref='patient_ref', lazy='dynamic')
-    patient_tasks = db.relationship('Task', backref='patient', lazy='dynamic')
+    tasks = db.relationship(
+        'Task',
+        foreign_keys='Task.patient_id', # Explicitly state the foreign key
+        backref='patient',              # This will create `task.patient`
+        lazy='dynamic',
+        order_by="desc(Task.created_at)"
+    )
 
     @property
     def age(self):
@@ -182,8 +192,9 @@ class PatientProblemList(db.Model):
     recorded_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     recorded_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-class OrderableItem(db.Model):
+class OrderableItem(db.Model): 
     __tablename__ = 'orderable_items'
+
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     item_type = db.Column(db.String(50), nullable=False)
     name = db.Column(db.String(255), nullable=False, index=True)
@@ -191,7 +202,15 @@ class OrderableItem(db.Model):
     code = db.Column(db.String(50), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
 
-    item = db.relationship('OrderableItem', backref='orders_placed', lazy='joined')
+    parent_id = db.Column(db.String(36), db.ForeignKey('orderable_items.id'), nullable=True)
+
+    parent = db.relationship(
+    'OrderableItem',
+    remote_side=[id],
+    backref=db.backref('children', lazy='joined'),
+    lazy='joined'
+)
+
 
 
 class Order(db.Model):
@@ -222,7 +241,6 @@ class Order(db.Model):
     is_critical = db.Column(db.Boolean, default=False)
 
     # Relationships
-    patient = db.relationship('Patient', backref='orders')
     orderable_item = db.relationship('OrderableItem', backref='orders')
     ordering_physician = db.relationship('User', foreign_keys=[ordering_physician_id])
     signed_by = db.relationship('User', foreign_keys=[signed_by_user_id])
@@ -349,60 +367,104 @@ class LabResult(db.Model):
     __tablename__ = 'lab_results'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=False)
-    # Could link to an OrderableItem (LabTest) if ordered through CPOE
     ordered_test_id = db.Column(db.String(36), db.ForeignKey('orderable_items.id'), nullable=True) 
     
-    test_name = db.Column(db.String(255), nullable=False) # e.g., "Hemoglobin", "Glucose, Random"
-    panel_name = db.Column(db.String(255), nullable=True) # e.g., "Complete Blood Count", "Basic Metabolic Panel"
+    test_name = db.Column(db.String(255), nullable=False)
+    panel_name = db.Column(db.String(255), nullable=True)
     
-    value = db.Column(db.String(100)) # Can be numeric or text
-    value_numeric = db.Column(db.Float, nullable=True) # For numeric results, to allow trending/graphing
+    value = db.Column(db.String(100))
+    value_numeric = db.Column(db.Float, nullable=True)
     units = db.Column(db.String(50))
-    reference_range = db.Column(db.String(100)) # e.g., "3.5-5.0"
+    reference_range = db.Column(db.String(100))
     
-    abnormal_flag = db.Column(db.String(20), nullable=True) # L, H, LL, HH, A, C (Critical)
-    status = db.Column(db.String(50), default='Preliminary') # Preliminary, Final, Corrected, Cancelled
+    abnormal_flag = db.Column(db.String(20), nullable=True)
+    status = db.Column(db.String(50), default='Preliminary')
     
     collection_datetime = db.Column(db.DateTime, nullable=False)
-    result_datetime = db.Column(db.DateTime, default=datetime.datetime.utcnow) # When result was made available
+    result_datetime = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     
     performing_lab = db.Column(db.String(100), nullable=True)
-    # For more complex results, might link to a blob/text field for full report
-    # comments = db.Column(db.Text)
     
     acknowledged_at = db.Column(db.DateTime, nullable=True)
     acknowledged_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
-    patient_ref = db.relationship('Patient', backref='lab_results', foreign_keys=[patient_id])
+    patient = db.relationship('Patient', backref='lab_results_data', lazy=True) # Changed backref to avoid conflict with relationship name
+    acknowledged_by = db.relationship('User', foreign_keys=[acknowledged_by_user_id])
 
+    # --- ADD THIS METHOD ---
+    def to_dict(self):
+        """Serializes the LabResult object to a dictionary."""
+        return {
+            "id": self.id,
+            "patient_id": self.patient_id,
+            "ordered_test_id": self.ordered_test_id,
+            "test_name": self.test_name,
+            "panel_name": self.panel_name,
+            "value": self.value,
+            "value_numeric": self.value_numeric,
+            "units": self.units,
+            "reference_range": self.reference_range,
+            "abnormal_flag": self.abnormal_flag,
+            "status": self.status,
+            "collection_datetime": self.collection_datetime.isoformat() if self.collection_datetime else None,
+            "result_datetime": self.result_datetime.isoformat() if self.result_datetime else None,
+            "performing_lab": self.performing_lab,
+            "acknowledged_at": self.acknowledged_at.isoformat() if self.acknowledged_at else None,
+            "acknowledged_by_user_id": self.acknowledged_by_user_id,
+            "acknowledged_by_username": self.acknowledged_by.username if self.acknowledged_by else None
+        }
+def __repr__(self):
+        return f'<LabResult {self.id} | {self.test_name} for Patient {self.patient_id}>'
 
 class ImagingReport(db.Model):
     __tablename__ = 'imaging_reports'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=False)
-    # Could link to an OrderableItem (ImagingStudy)
     ordered_study_id = db.Column(db.String(36), db.ForeignKey('orderable_items.id'), nullable=True)
     
     modality = db.Column(db.String(50), nullable=False) # XRAY, CT, MRI, US, ECHO
-    study_description = db.Column(db.String(255), nullable=False) # e.g., "Chest X-Ray PA and Lateral", "CT Abdomen w/ Contrast"
+    study_description = db.Column(db.String(255), nullable=False)
     study_datetime = db.Column(db.DateTime, nullable=False)
     
-    report_text = db.Column(db.Text) # Impressions, Findings
+    report_text = db.Column(db.Text) # Full report text including impressions and findings
     impression_text = db.Column(db.Text, nullable=True) # Key impressions for quick view
     
     status = db.Column(db.String(50), default='Preliminary') # Preliminary, Final, Addendum
     reported_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True) # Radiologist
     report_datetime = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     
-    # Placeholder for PACS integration details
-    # pacs_study_uid = db.Column(db.String(255), unique=True, nullable=True)
-    # dicom_viewer_link = db.Column(db.String(512), nullable=True)
-    
     acknowledged_at = db.Column(db.DateTime, nullable=True)
     acknowledged_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
-    patient_ref = db.relationship('Patient', backref='imaging_reports', foreign_keys=[patient_id])
+    # Relationships
+    patient = db.relationship('Patient', backref='imaging_reports_data', lazy=True) # Changed backref to avoid conflict
+    reported_by = db.relationship('User', foreign_keys=[reported_by_user_id])
+    acknowledged_by = db.relationship('User', foreign_keys=[acknowledged_by_user_id])
+    orderable_item = db.relationship('OrderableItem') # For getting original order info
 
+    def to_dict(self):
+        """Serializes the ImagingReport object to a dictionary."""
+        return {
+            "id": self.id,
+            "patient_id": self.patient_id,
+            "ordered_study_id": self.ordered_study_id,
+            "modality": self.modality,
+            "study_description": self.study_description,
+            "study_datetime": self.study_datetime.isoformat() if self.study_datetime else None,
+            "report_text": self.report_text,
+            "impression_text": self.impression_text,
+            "status": self.status,
+            "reported_by_user_id": self.reported_by_user_id,
+            "reported_by_username": self.reported_by.username if self.reported_by else None,
+            "report_datetime": self.report_datetime.isoformat() if self.report_datetime else None,
+            "acknowledged_at": self.acknowledged_at.isoformat() if self.acknowledged_at else None,
+            "acknowledged_by_user_id": self.acknowledged_by_user_id,
+            "acknowledged_by_username": self.acknowledged_by.username if self.acknowledged_by else None
+        }
+
+    def __repr__(self):
+        return f'<ImagingReport {self.id} for Patient {self.patient_id}>'
+    
 class CDSRule(db.Model):
     __tablename__ = 'cds_rules'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -411,13 +473,23 @@ class CDSRule(db.Model):
     # e.g., "DrugInteraction", "AllergyCheck", "DoseRange", "DuplicateOrder", "GuidelineReminder"
     rule_type = db.Column(db.String(100), nullable=False, index=True)
     # JSONB is great for storing flexible rule criteria, actions, messages, severity, etc.
-    # Example criteria: {"drug_a_id": "uuid", "drug_b_id": "uuid", "condition": "INTERACTS_WITH"}
-    # Example action: {"type": "ALERT", "severity": "HIGH", "message_template": "Warning: {drug_a} interacts with {drug_b}."}
     rule_logic = db.Column(db.JSON, nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-    # version = db.Column(db.Integer, default=1) # Optional: for versioning rules
+
+    def to_dict(self):
+        """Serializes the CDSRule object to a dictionary."""
+        return {
+            "id": self.id,
+            "rule_name": self.rule_name,
+            "description": self.description,
+            "rule_type": self.rule_type,
+            "rule_logic": self.rule_logic,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None
+        }
 
     def __repr__(self):
         return f'<CDSRule {self.rule_name} ({self.rule_type})>'
@@ -425,8 +497,8 @@ class CDSRule(db.Model):
 class Task(db.Model):
     __tablename__ = 'tasks'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=True)
-    assigned_to_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True) # Allow unassigned tasks initially?
+    patient_id = db.Column(db.String(36), db.ForeignKey('patients.id'), nullable=True, index=True) 
+    assigned_to_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True) 
     created_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     
     title = db.Column(db.String(255), nullable=False)
@@ -449,7 +521,6 @@ class Task(db.Model):
 
     # Relationships
     # Ensure backref names are unique if 'tasks' is used elsewhere for Patient or User
-    patient = db.relationship('Patient', backref=db.backref('tasks_for_patient', lazy='dynamic'))
     assigned_to = db.relationship('User', foreign_keys=[assigned_to_user_id], backref=db.backref('assigned_tasks', lazy='dynamic'))
     created_by = db.relationship('User', foreign_keys=[created_by_user_id], backref=db.backref('created_tasks', lazy='dynamic'))
 
