@@ -26,7 +26,9 @@ class Config:
 
     # Frontend URL
     FRONTEND_URL = os.environ.get('FRONTEND_URL') or 'http://localhost:3000'
-
+    
+    CACHE_TYPE = 'RedisCache'
+    CACHE_REDIS_URL = os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
 
 class DevelopmentConfig(Config):
     """Development-specific configuration."""

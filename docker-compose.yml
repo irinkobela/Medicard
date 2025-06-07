@@ -1,0 +1,33 @@
+services:
+  # The service for your Flask Application
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+
+  # The service for the PostgreSQL Database
+  db:
+    image: postgres:13-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=myuser
+      - POSTGRES_PASSWORD=mypassword
+      - POSTGRES_DB=hms_db
+    ports:
+      - "5432:5432"
+
+  # The service for Redis
+  redis:
+    image: redis:6-alpine
+
+# TOP-LEVEL VOLUMES KEY:
+volumes:
+  postgres_data:

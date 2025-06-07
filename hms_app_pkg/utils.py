@@ -142,7 +142,15 @@ def get_current_user_from_token():
         g.authentication_error = "Invalid user ID format in token."
         return None
 
-
+def parse_iso_datetime(dt_str):
+    """Helper: Parse ISO string, returns None on failure."""
+    if not dt_str or not isinstance(dt_str, str):
+        return None
+    try:
+        return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+    
 def permission_required(required_permission):
     def decorator(f):
         @wraps(f)
