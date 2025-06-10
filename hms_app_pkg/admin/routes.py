@@ -1,17 +1,15 @@
-# hms_app_pkg/admin/routes.py
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, jsonify, current_app, request
 from .. import db
-from ..models import Role, Permission, User, OrderableItem, CDSRule # Ensure all needed models are here
-# from ..models import Patient, Task, etc. # If creating sample data for these
-from ..utils import permission_required # If you protect this endpoint
+from ..models import Role, Permission, User, OrderableItem, CDSRule
+from ..utils import permission_required
 
 admin_bp = Blueprint('admin_bp', __name__)
 
 @admin_bp.route('/setup-roles-permissions', methods=['POST'])
-# @permission_required('admin:manage_system_setup') # Recommended to protect this
+# @permission_required('admin:manage_system_setup')
 def setup_roles_permissions():
     try:
-        # Comprehensive Permissions Data (name: description)
+        # Permissions dictionary omitted for brevity - insert original dictionary here...
         permissions_data = {
             'patient:read': 'Can read patient data',
             'patient:create': 'Can create new patients',
@@ -165,17 +163,17 @@ def setup_roles_permissions():
             'admin:manage_permissions': '(Admin) Can manage system permissions',
             'admin:manage_system_setup': '(Admin) Can perform system setup tasks'
         }
-        created_permissions = {}
+
+        existing_perms = {p.name for p in Permission.query.all()}
         for name, desc in permissions_data.items():
-            perm = Permission.query.filter_by(name=name).first()
-            if not perm:
-                perm = Permission(name=name, description=desc)
-                db.session.add(perm)
-            created_permissions[name] = perm
+            if name not in existing_perms:
+                db.session.add(Permission(name=name, description=desc))
         db.session.commit()
 
-        # --- Define Roles and Assign Permissions ---
+        perm_map = {p.name: p for p in Permission.query.all()}
         roles_config = {
+            'System Admin': [ list(permissions_data.keys()) ],
+
             'AttendingPhysician': [
                 # Patient & Notes
                 'patient:read', 'patient:create', 'patient:read:own',
@@ -264,37 +262,40 @@ def setup_roles_permissions():
                 'appointment:read', 'report:read:length_of_stay', # Relevant report for this role
                 'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
             ],
-            'Scheduler': [ # Example role for schedulers
+            'Scheduler': [ 
                 'patient:read', 'patient:create', # To find and register patients for scheduling
                 'appointment:create', 'appointment:read:any', 'appointment:update:any', 
                 'appointment:cancel:any', 'appointment:reschedule:any', 'appointment:manage_schedule',
                 'notification:read', 'notification:update', 'notification:delete',
                 'user:profile:read', 'user:logout', 'dashboard:read', 'cds:execute',
-            ],
-            'SystemAdmin': list(permissions_data.keys()) # Gets all permissions
+            ]
         }
 
-        for role_name, perm_names_for_role in roles_config.items():
+        for role_name, perm_names in roles_config.items():
             role = Role.query.filter_by(name=role_name).first()
             if not role:
-                role = Role(name=role_name, description=f'{role_name} role.')
+                role = Role(name=role_name)
                 db.session.add(role)
-                db.session.flush() 
-
-            current_role_perms_names = {p.name for p in role.permissions}
-            
-            for perm_name in perm_names_for_role:
-                if perm_name in created_permissions and perm_name not in current_role_perms_names:
-                     role.permissions.append(created_permissions[perm_name])
-            
-            # Optional: Logic to remove permissions from a role if they are no longer in perm_names_for_role
-            # permissions_to_remove = [p for p in role.permissions if p.name not in perm_names_for_role]
-            # for p_to_remove in permissions_to_remove:
-            #    role.permissions.remove(p_to_remove)
-                
+            role.permissions = [perm_map[p_name] for p_name in perm_names if p_name in perm_map]
         db.session.commit()
 
-        # Sample OrderableItems (as before)
+        admin_user = User.query.filter_by(username="Admin").first()
+        if not admin_user:
+            admin_user = User(
+                username="Admin",
+                email="sysadmin@hospital.hms",
+                full_name="System Administrator",
+                is_active=True
+            )
+            admin_user.set_password("12345678")
+            db.session.add(admin_user)
+            db.session.commit()
+
+        admin_role = Role.query.filter_by(name="System Admin").first()
+        if admin_role and admin_role not in admin_user.roles:
+            admin_user.roles.append(admin_role)
+            db.session.commit()
+
         if not OrderableItem.query.first():
             sample_items_data = [
                 {'item_type': 'Medication', 'name': 'Aspirin 81mg Tablet', 'generic_name': 'Aspirin', 'code': 'NDC-ASP81', 'min_dose': 81, 'max_dose': 650, 'default_dose_unit': 'mg'},
@@ -309,28 +310,52 @@ def setup_roles_permissions():
             db.session.commit()
             current_app.logger.info("Added sample orderable items.")
 
-        # Sample CDS Rule for Drug-Drug Interaction
         if not CDSRule.query.filter_by(rule_type='DrugInteraction').first():
             interaction_rule = CDSRule(
                 rule_name="Warfarin and Aspirin Interaction Alert",
                 description="Alerts when Aspirin is ordered for a patient already on Warfarin, or vice-versa.",
                 rule_type="DrugInteraction",
-                rule_logic={
-                    "interactions": [
-                        # Each sub-list is a pair of interacting drug names (should be lowercase)
-                        ["warfarin", "aspirin"]
-                    ]
-                },
+                rule_logic={"interactions": [["warfarin", "aspirin"]]},
                 is_active=True
             )
             db.session.add(interaction_rule)
+            db.session.commit()
             current_app.logger.info("Added sample Drug-Drug Interaction CDS rule.")
 
-        db.session.commit()
-        return jsonify({"message": "Roles and permissions setup/updated successfully."}), 201
+        current_app.logger.info("Roles, permissions, and default admin setup completed successfully.")
+        return jsonify({"message": "Roles, permissions, and default admin setup completed successfully."}), 200
+
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error setting up roles/permissions: {str(e)}", exc_info=True) # Add exc_info for full traceback
-        return jsonify({"message": "Error setting up roles/permissions", "error": str(e)}), 500
+        current_app.logger.error(f"Error during initial setup: {e}", exc_info=True)
+        return jsonify({"error": "An error occurred during setup."}), 500
 
-# ... (other admin routes if any)
+
+@admin_bp.route('/users/<int:user_id>/assign-role', methods=['POST'])
+@permission_required('admin:users:update')
+def assign_role_to_user(user_id):
+    try:
+        data = request.get_json()
+        if not data or 'role_name' not in data:
+            return jsonify({"error": "Role name is required."}), 400
+
+        role_name = data.get('role_name')
+        user = User.query.get_or_404(user_id)
+        role = Role.query.filter_by(name=role_name).first()
+
+        if not role:
+            return jsonify({"error": f"Role '{role_name}' not found."}), 404
+
+        if role in user.roles:
+            return jsonify({"message": f"User '{user.username}' is already in role '{role_name}'."}), 200
+
+        user.roles.append(role)
+        db.session.commit()
+
+        current_app.logger.info(f"Assigned role '{role_name}' to user '{user.username}'.")
+        return jsonify({"message": f"User '{user.username}' assigned to role '{role_name}'."}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error assigning role: {e}", exc_info=True)
+        return jsonify({"message": "Error assigning role", "error": str(e)}), 500
